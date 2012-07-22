@@ -4,6 +4,13 @@
 # open source and publically available under the MIT license.
 # Use this module at your own risk.
 
+# This script only work with Ruby 1.9.x
+
+raise "This script don't work with Ruby #{RUBY_VERSION}" if RUBY_VERSION < "1.9"
+
+Encoding.default_external = "UTF-8"
+
+
 require 'rubygems'
 require 'sequel'
 require 'fileutils'
@@ -32,22 +39,18 @@ require 'awesome_print'
 
 module Jekyll
   module MT2
-    # 
-
-    # Placement of Entries into Categories
-    class Placement
-    end
-     
     # Representation of category
     class Category
       @@categories = { }
       attr_reader :id, :parent_id, :label, :children
       attr_accessor :parent
       
-      def initialize(id, parent_id, label)
+      def initialize(id, parent_id, label, opts)
         @id = id
         @parent_id = parent_id
-        @label = label
+        @label = if opts[:force_encoding] != nil then
+                        label.force_encoding(opts[:force_encoding])
+                        else label end
         @parent = nil
         @children = []
         @@categories[@id] = self
@@ -102,20 +105,66 @@ module Jekyll
         category_query += "where category_blog_id = #{opts[:blog_id]}" if opts[:blog_id] != nil
         
         db[category_query].each do |cat|
-          self.new(cat[:category_id], cat[:category_parent], cat[:category_label])
+          self.new(cat[:category_id], cat[:category_parent], cat[:category_label], opts)
         end
 
         self.set_parents
       end
     end
 
+    # Placement of Entries into Categories
+    class Placement
+      attr_reader :entry_id, :blog_id
+      @@placement = {}
+
+      def initialize(entry_id, blog_id)
+        @entry_id = entry_id
+        @blog_id = blog_id
+        @primary = nil
+        @categories = []
+      end
+
+      def add(category_id, is_primary)
+        @categories.push(category_id)
+        @primary = category_id if is_primary
+      end
+
+      def self.fetch_placements(db, opts)
+        placement_query = "SELECT placement_entry_id, placement_blog_id,
+                                  placement_category_id, placement_is_primary FROM mt_placement"
+        placement_query += "where placement_blog_id = #{opts[:blog_id]}" if opts[:blog_id] != nil
+
+        db[placement_query].each do |p|
+          pp = @@placement[p[:placement_entry_id].to_i] ||=
+                     self.new(p[:placement_entry_id], p[:placement_blog_id])
+          pp.add(p[:placement_category_id].to_i, p[:placement_is_primary] == 1)
+        end
+      end
+
+      def categories
+        @categories.map {|n| Category.get_category_path(n) }
+      end
+
+      def self.get_categories(entry_id)
+        if (c = @@placement[entry_id]) != nil
+          c.categories
+        else
+          [ ]
+        end
+      end
+    end
     
     def self.process(dbname, user, pass, host = 'localhost', opts = {})
-      FileUtils.mkdir_p "_posts"
-      db = Sequel.mysql(dbname, :user => user, :password => pass, :host => host, :encoding => 'latin1')
+      opts = {
+          :encoding => "utf8",
+        }.merge(opts)
 
-      # First, read-in category hierarchy
+      FileUtils.mkdir_p "_posts"
+      db = Sequel.mysql(dbname, :user => user, :password => pass, :host => host, :encoding => opts[:encoding])
+
+      # First, read-in category hierarchy and placements
       Jekyll::MT2::Category.fetch_category(db, opts)
+      Jekyll::MT2::Placement.fetch_placements(db, opts)
 
       entry_query = "SELECT entry_id, \
                     entry_basename, \
@@ -133,9 +182,9 @@ module Jekyll
       
 
       db[entry_query].each do |post|
-        if opts[:force_encode]
+        if opts[:force_encoding] != nil
             [:entry_title, :entry_text, :entry_text_more, :fileinfo_url].each do |k|
-                post[k].force_encoding("utf-8") if post[k] != nil
+                post[k].force_encoding(opts[:force_encoding]) if post[k] != nil
             end
         end
         title = post[:entry_title]
@@ -144,8 +193,7 @@ module Jekyll
         content = post[:entry_text]
         more_content = post[:entry_text_more]
         entry_convert_breaks = post[:entry_convert_breaks]
-        category_id = post[:entry_category_id].to_i
-        category = if category_id != 0 then Category.get_category_path(category_id) else nil end
+        categories = Placement.get_categories(post[:entry_id])
 		
         # Be sure to include the body and extended body.
         if more_content != nil
@@ -162,13 +210,12 @@ module Jekyll
         permalink.sub!(/#{opts[:permalink_remove_regexp]}/, '') if opts[:permalink_remove_regexp]
         data = {
            'layout' => 'post',
-           'title' => title.to_s,
+           'title' => title,
            'mt_id' => post[:entry_id],
            'permalink' => permalink,
-           'category' => category,
+           'category' => categories,
            'date' => date
-         }.delete_if { |k,v| v.nil? || v == '' }.to_yaml
-
+        }.delete_if { |k,v| v.nil? || v == '' }.to_yaml
         
         File.open("_posts/#{name}", "w") do |f|
           f.puts data
