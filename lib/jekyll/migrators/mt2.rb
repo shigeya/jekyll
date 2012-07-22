@@ -154,6 +154,75 @@ module Jekyll
       end
     end
     
+    # relationship of object (actually, entry) and tags
+    class Tag
+      @@tags = { }
+      attr_reader :id, :label
+      attr_accessor :noramlized
+      
+      def initialize(id, normalize_id, label, opts)
+        @id = id
+        @normalize_id = id
+        @label = if opts[:force_encoding] != nil then
+                        label.force_encoding(opts[:force_encoding])
+                        else label end
+        @@tags[@id] = self
+      end
+      
+      def self.get_tag_name(n)
+        @@tags[n].label
+      end
+      
+      def self.fetch_tags(db, opts)
+        tag_query = "SELECT tag_id, tag_is_private, tag_n8d_id, tag_name from mt_tag"
+        
+        db[tag_query].each do |tag|
+          self.new(tag[:tag_id], tag[:tag_n8d_id], tag[:tag_name], opts)
+        end
+      end
+
+    end
+    
+    class ObjectTag
+      attr_reader :entry_id, :blog_id
+      @@object_tags = {}
+
+      def initialize(entry_id, blog_id)
+        @entry_id = entry_id
+        @blog_id = blog_id
+        @tags = []
+      end
+
+      def add(tag_id)
+        @tags.push(tag_id)
+      end
+
+      def self.fetch_object_tags(db, opts)
+        tag_query = "SELECT objecttag_id, objecttag_blog_id, objecttag_object_id, objecttag_tag_id
+                     FROM mt_objecttag
+                     WHERE objecttag_object_datasource = 'entry'"
+        tag_query += "and objecttag_blog_id = #{opts[:blog_id]}" if opts[:blog_id] != nil
+
+        db[tag_query].each do |t|
+          tt = @@object_tags[t[:objecttag_object_id].to_i] ||=
+                     self.new(t[:objecttag_object_id], t[:objecttag_blog_id])
+          tt.add(t[:objecttag_tag_id].to_i)
+        end        
+      end
+
+      def tags
+        @tags.map {|n| Tag.get_tag_name(n) }
+      end
+
+      def self.get_tags(entry_id)
+        if (o = @@object_tags[entry_id]) != nil
+          o.tags
+        else
+          [ ]
+        end
+      end
+    end
+    
     def self.process(dbname, user, pass, host = 'localhost', opts = {})
       opts = {
           :encoding => "utf8",
@@ -165,6 +234,8 @@ module Jekyll
       # First, read-in category hierarchy and placements
       Jekyll::MT2::Category.fetch_category(db, opts)
       Jekyll::MT2::Placement.fetch_placements(db, opts)
+      Jekyll::MT2::Tag.fetch_tags(db, opts)
+      Jekyll::MT2::ObjectTag.fetch_object_tags(db, opts)
 
       entry_query = "SELECT entry_id, \
                     entry_basename, \
@@ -194,7 +265,8 @@ module Jekyll
         more_content = post[:entry_text_more]
         entry_convert_breaks = post[:entry_convert_breaks]
         categories = Placement.get_categories(post[:entry_id])
-		
+		tags = ObjectTag.get_tags(post[:entry_id])
+
         # Be sure to include the body and extended body.
         if more_content != nil
           content = content + " \n" + more_content
@@ -214,6 +286,7 @@ module Jekyll
            'mt_id' => post[:entry_id],
            'permalink' => permalink,
            'category' => categories,
+           'tags' => tags,
            'date' => date
         }.delete_if { |k,v| v.nil? || v == '' }.to_yaml
         
